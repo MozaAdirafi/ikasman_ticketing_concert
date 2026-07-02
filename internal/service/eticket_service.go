@@ -131,7 +131,7 @@ func sendEticketEmail(toEmail, name, ticketType string, qrPNG []byte) error {
 
 	fromEmail := os.Getenv("FROM_EMAIL")
 	if fromEmail == "" {
-		fromEmail = "tickets@yourdomain.com"
+		fromEmail = "ikasman37@gmail.com"
 	}
 
 	client := resend.NewClient(apiKey)

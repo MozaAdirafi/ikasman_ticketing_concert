@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -222,6 +223,17 @@ func createMidtransTransaction(orderID string, grossAmount int64, customerName, 
 	if frontendURL == "" {
 		frontendURL = "http://localhost:3001"
 	}
+	// Remove trailing slash if present
+	frontendURL = strings.TrimSuffix(frontendURL, "/")
+
+	redirectURL := frontendURL + "/checkout?order_id=" + orderID
+	finishRedirectURL := frontendURL + "/checkout?order_id=" + orderID
+
+	log.Printf("[DEBUG] Midtrans transaction URLs:")
+	log.Printf("[DEBUG]   FRONTEND_URL (from env): %s", os.Getenv("FRONTEND_URL"))
+	log.Printf("[DEBUG]   frontendURL (processed): %s", frontendURL)
+	log.Printf("[DEBUG]   redirect_url: %s", redirectURL)
+	log.Printf("[DEBUG]   finish_redirect_url: %s", finishRedirectURL)
 
 	payload := map[string]interface{}{
 		"transaction_details": map[string]interface{}{
@@ -233,8 +245,9 @@ func createMidtransTransaction(orderID string, grossAmount int64, customerName, 
 			"email":      customerEmail,
 			"phone":      customerPhone,
 		},
-		"item_details": itemList,
-		"redirect_url": frontendURL + "/checkout?order_id=" + orderID,
+		"item_details":       itemList,
+		"redirect_url":       redirectURL,
+		"finish_redirect_url": finishRedirectURL,
 	}
 
 	jsonPayload, err := json.Marshal(payload)
