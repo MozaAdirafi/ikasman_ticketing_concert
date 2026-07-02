@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS order_items;
+ALTER TABLE orders ALTER COLUMN ticket_id SET NOT NULL;
