@@ -58,6 +58,16 @@ type CreateOrderResult struct {
 }
 
 func (s *OrderService) CreateOrder(ctx context.Context, params CreateOrderParams) (*CreateOrderResult, error) {
+	log.Printf("[DEBUG] ===== ORDER CREATION START =====")
+	log.Printf("[DEBUG] Parsed request params:")
+	log.Printf("[DEBUG]   Name: %s", params.Name)
+	log.Printf("[DEBUG]   Email: %s", params.Email)
+	log.Printf("[DEBUG]   Whatsapp: %s", params.Whatsapp)
+	log.Printf("[DEBUG]   Items count: %d", len(params.Items))
+	for i, item := range params.Items {
+		log.Printf("[DEBUG]   Item[%d]: ticket_id=%s, quantity=%d", i, item.TicketID, item.Quantity)
+	}
+
 	if len(params.Items) == 0 {
 		return nil, errors.New("at least one item is required")
 	}
@@ -111,16 +121,29 @@ func (s *OrderService) CreateOrder(ctx context.Context, params CreateOrderParams
 	if err != nil {
 		return nil, fmt.Errorf("failed to upsert user: %w", err)
 	}
+	log.Printf("[DEBUG] User upserted: user_id=%s", user.ID)
+
+	// Use the first item's ticket_id for backward compatibility
+	firstTicketID := params.Items[0].TicketID
+	firstTicket := ticketMap[firstTicketID]
+	log.Printf("[DEBUG] Inserting order with:")
+	log.Printf("[DEBUG]   user_id: %s", user.ID)
+	log.Printf("[DEBUG]   ticket_id: %s (from first item)", firstTicket.ID)
+	log.Printf("[DEBUG]   quantity: 1")
+	log.Printf("[DEBUG]   total_amount: %d", totalAmount)
+	log.Printf("[DEBUG]   SQL: INSERT INTO orders (user_id, ticket_id, quantity, total_amount, status) VALUES ($1, $2, $3, $4, 'pending')")
 
 	order, err := qtx.CreateOrder(ctx, db.CreateOrderParams{
 		UserID:      user.ID,
-		TicketID:    nil,
+		TicketID:    &firstTicket.ID,
 		Quantity:    1,
 		TotalAmount: totalAmount,
 	})
 	if err != nil {
+		log.Printf("[ERROR] Failed to create order: %v", err)
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
+	log.Printf("[DEBUG] Order created: order_id=%s, status=pending", order.ID)
 
 	for i, item := range params.Items {
 		ticket := ticketMap[item.TicketID]
