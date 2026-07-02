@@ -32,12 +32,29 @@ type CheckinResult struct {
 }
 
 func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) error {
+	log.Printf("[DEBUG] ===== E-TICKET GENERATION START =====")
+	log.Printf("[DEBUG] Input orderID parameter: '%s'", orderID)
+	log.Printf("[DEBUG] orderID type: string, length: %d", len(orderID))
+	log.Printf("[DEBUG] orderID is valid UUID format: %v", isValidUUID(orderID))
+
 	log.Printf("[INFO]   Step 4a: Fetching order details for order_id: %s", orderID)
+	log.Printf("[DEBUG]   SQL Query: SELECT o.id, o.user_id, o.ticket_id, u.name, u.email, t.name FROM orders o JOIN users u ON u.id = o.user_id JOIN tickets t ON t.id = o.ticket_id WHERE o.id = $1")
+	log.Printf("[DEBUG]   Query Parameter [$1]: '%s' (type: string/UUID)", orderID)
+
 	order, err := s.q.GetOrderWithDetails(ctx, orderID)
 	if err != nil {
 		log.Printf("[ERROR]   Step 4a FAILED: Order not found: %v", err)
+		log.Printf("[DEBUG]   Query execution failed - error type: %T, error details: %v", err, err)
 		return fmt.Errorf("order not found: %w", err)
 	}
+	log.Printf("[DEBUG] Query succeeded - order result:")
+	log.Printf("[DEBUG]   order.ID: %v", order.ID)
+	log.Printf("[DEBUG]   order.UserID: %v", order.UserID)
+	log.Printf("[DEBUG]   order.TicketID: %v", order.TicketID)
+	log.Printf("[DEBUG]   order.UserName: %s", order.UserName)
+	log.Printf("[DEBUG]   order.UserEmail: %s", order.UserEmail)
+	log.Printf("[DEBUG]   order.TicketName: %s", order.TicketName)
+
 	log.Printf("[INFO]   Step 4b: Order found - user_id: %s, ticket_id: %s, quantity: %d", order.UserID, order.TicketID, 1)
 	log.Printf("[INFO]       User: %s (%s)", order.UserName, order.UserEmail)
 
@@ -67,8 +84,14 @@ func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) er
 		return fmt.Errorf("failed to send eticket email: %w", err)
 	}
 	log.Printf("[INFO]   Step 4f: Email sent successfully to %s", order.UserEmail)
+	log.Printf("[DEBUG] ===== E-TICKET GENERATION COMPLETE =====")
 
 	return nil
+}
+
+func isValidUUID(u string) bool {
+	_, err := uuid.Parse(u)
+	return err == nil
 }
 
 func (s *EticketService) Checkin(ctx context.Context, qrCode string) (*CheckinResult, error) {
