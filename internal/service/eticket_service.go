@@ -32,11 +32,16 @@ type CheckinResult struct {
 }
 
 func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) error {
+	log.Printf("[INFO]   Step 4a: Fetching order details for order_id: %s", orderID)
 	order, err := s.q.GetOrderWithDetails(ctx, orderID)
 	if err != nil {
+		log.Printf("[ERROR]   Step 4a FAILED: Order not found: %v", err)
 		return fmt.Errorf("order not found: %w", err)
 	}
+	log.Printf("[INFO]   Step 4b: Order found - user_id: %s, ticket_id: %s, quantity: %d", order.UserID, order.TicketID, 1)
+	log.Printf("[INFO]       User: %s (%s)", order.UserName, order.UserEmail)
 
+	log.Printf("[INFO]   Step 4c: Generating QR code")
 	qrValue := uuid.New().String()
 
 	if _, err := s.q.CreateEticket(ctx, db.CreateEticketParams{
@@ -45,17 +50,23 @@ func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) er
 		TicketID: order.TicketID,
 		QrCode:   qrValue,
 	}); err != nil {
+		log.Printf("[ERROR]   Step 4c FAILED: Could not create eticket record: %v", err)
 		return fmt.Errorf("failed to create eticket: %w", err)
 	}
 
 	qrPNG, err := qrcode.Encode(qrValue, qrcode.Medium, 256)
 	if err != nil {
+		log.Printf("[ERROR]   Step 4c FAILED: Could not generate QR code: %v", err)
 		return fmt.Errorf("failed to generate QR code: %w", err)
 	}
+	log.Printf("[INFO]   Step 4d: QR code generated successfully (qr_value: %s)", qrValue)
 
+	log.Printf("[INFO]   Step 4e: Sending email to %s", order.UserEmail)
 	if err := sendEticketEmail(order.UserEmail, order.UserName, order.TicketName, qrPNG); err != nil {
-		log.Printf("[ERROR] Failed to send eticket email to %s: %v", order.UserEmail, err)
+		log.Printf("[ERROR]   Step 4e FAILED: Could not send eticket email: %v", err)
+		return fmt.Errorf("failed to send eticket email: %w", err)
 	}
+	log.Printf("[INFO]   Step 4f: Email sent successfully to %s", order.UserEmail)
 
 	return nil
 }
