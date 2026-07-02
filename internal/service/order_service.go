@@ -260,24 +260,30 @@ func createMidtransTransaction(orderID string, grossAmount int64, customerName, 
 	return redirectURL, nil
 }
 
-func VerifyMidtransSignature(orderID, statusCode string, grossAmount int64, signature string) bool {
+func VerifyMidtransSignature(orderID, statusCode, grossAmount, signature string) bool {
 	serverKey := os.Getenv("MIDTRANS_SERVER_KEY")
 	if serverKey == "" {
 		log.Printf("[ERROR] MIDTRANS_SERVER_KEY not set")
 		return false
 	}
 
-	signatureString := orderID + statusCode + fmt.Sprintf("%d", grossAmount) + serverKey
+	// Signature formula: SHA512(order_id + status_code + gross_amount + server_key)
+	signatureString := orderID + statusCode + grossAmount + serverKey
 	hash := sha512.Sum512([]byte(signatureString))
 	expectedSignature := hex.EncodeToString(hash[:])
 
 	isValid := expectedSignature == signature
-	log.Printf("[DEBUG] Signature verification: orderID=%s, statusCode=%s, grossAmount=%d", orderID, statusCode, grossAmount)
-	log.Printf("[DEBUG] Signature string: %s", signatureString)
+	log.Printf("[DEBUG] Signature verification:")
+	log.Printf("[DEBUG]   order_id: %s", orderID)
+	log.Printf("[DEBUG]   status_code: %s", statusCode)
+	log.Printf("[DEBUG]   gross_amount: %s", grossAmount)
+	log.Printf("[DEBUG]   signature_string: %s", signatureString)
 	if !isValid {
-		log.Printf("[WARN] Midtrans signature mismatch. Expected: %s, Got: %s", expectedSignature, signature)
+		log.Printf("[WARN] Midtrans signature mismatch.")
+		log.Printf("[WARN]   Expected: %s", expectedSignature)
+		log.Printf("[WARN]   Got:      %s", signature)
 	} else {
-		log.Printf("[INFO] Midtrans signature verified successfully")
+		log.Printf("[INFO] ✓ Midtrans signature verified successfully")
 	}
 	return isValid
 }

@@ -49,12 +49,13 @@ func (s *PaymentService) GetPaymentStatus(ctx context.Context, orderID string) (
 }
 
 type MidtransWebhookPayload struct {
-	OrderID       string `json:"order_id"`
-	TransactionID string `json:"transaction_id"`
-	TransactionTime string `json:"transaction_time"`
+	OrderID           string `json:"order_id"`
+	TransactionID     string `json:"transaction_id"`
+	TransactionTime   string `json:"transaction_time"`
 	TransactionStatus string `json:"transaction_status"`
-	SignatureKey  string `json:"signature_key"`
-	GrossAmount   string `json:"gross_amount"`
+	StatusCode        string `json:"status_code"`
+	GrossAmount       string `json:"gross_amount"`
+	SignatureKey      string `json:"signature_key"`
 }
 
 func (s *PaymentService) HandleWebhook(ctx context.Context, r *http.Request, eticketSvc *EticketService) error {
@@ -74,8 +75,8 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, r *http.Request, eti
 	}
 	log.Printf("[DEBUG] Parsed gross_amount: %s -> %.2f -> %d", payload.GrossAmount, grossAmountFloat, grossAmount)
 
-	// Verify Midtrans signature
-	if !VerifyMidtransSignature(payload.OrderID, payload.TransactionStatus, grossAmount, payload.SignatureKey) {
+	// Verify Midtrans signature using status_code (NOT transaction_status)
+	if !VerifyMidtransSignature(payload.OrderID, payload.StatusCode, payload.GrossAmount, payload.SignatureKey) {
 		return errors.New("invalid signature")
 	}
 
