@@ -1,6 +1,6 @@
 module github.com/MozaAdirafi/ikasman_ticketing_concert
 
-go 1.26.4
+go 1.22
 
 require (
 	github.com/gin-gonic/gin v1.12.0
