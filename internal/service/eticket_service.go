@@ -1,17 +1,21 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	fpdf "github.com/go-pdf/fpdf"
 	"github.com/google/uuid"
-	qrcode "github.com/skip2/go-qrcode"
-
 	resend "github.com/resend/resend-go/v2"
+	qrcode "github.com/skip2/go-qrcode"
 
 	db "github.com/MozaAdirafi/ikasman_ticketing_concert/internal/db/sqlc"
 )
@@ -31,62 +35,300 @@ type CheckinResult struct {
 	TicketType   string `json:"ticket_type,omitempty"`
 }
 
-func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) error {
-	log.Printf("[DEBUG] ===== E-TICKET GENERATION START =====")
-	log.Printf("[DEBUG] Input orderID parameter: '%s'", orderID)
-	log.Printf("[DEBUG] orderID type: string, length: %d", len(orderID))
-	log.Printf("[DEBUG] orderID is valid UUID format: %v", isValidUUID(orderID))
+type ticketGenData struct {
+	index   int
+	total   int
+	qrPNG   []byte
+	pdfData []byte
+}
 
-	log.Printf("[INFO]   Step 4a: Fetching order details for order_id: %s", orderID)
-	log.Printf("[DEBUG]   SQL Query: SELECT o.id, o.user_id, o.ticket_id, u.name, u.email, t.name FROM orders o JOIN users u ON u.id = o.user_id JOIN tickets t ON t.id = o.ticket_id WHERE o.id = $1")
-	log.Printf("[DEBUG]   Query Parameter [$1]: '%s' (type: string/UUID)", orderID)
+func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) error {
+	log.Printf("[INFO] E-ticket generation start for order: %s", orderID)
 
 	order, err := s.q.GetOrderWithDetails(ctx, orderID)
 	if err != nil {
-		log.Printf("[ERROR]   Step 4a FAILED: Order not found: %v", err)
-		log.Printf("[DEBUG]   Query execution failed - error type: %T, error details: %v", err, err)
 		return fmt.Errorf("order not found: %w", err)
 	}
-	log.Printf("[DEBUG] Query succeeded - order result:")
-	log.Printf("[DEBUG]   order.ID: %v", order.ID)
-	log.Printf("[DEBUG]   order.UserID: %v", order.UserID)
-	log.Printf("[DEBUG]   order.TicketID: %v", order.TicketID)
-	log.Printf("[DEBUG]   order.UserName: %s", order.UserName)
-	log.Printf("[DEBUG]   order.UserEmail: %s", order.UserEmail)
-	log.Printf("[DEBUG]   order.TicketName: %s", order.TicketName)
 
-	log.Printf("[INFO]   Step 4b: Order found - user_id: %s, ticket_id: %s, quantity: %d", order.UserID, order.TicketID, 1)
-	log.Printf("[INFO]       User: %s (%s)", order.UserName, order.UserEmail)
-
-	log.Printf("[INFO]   Step 4c: Generating QR code")
-	qrValue := uuid.New().String()
-
-	if _, err := s.q.CreateEticket(ctx, db.CreateEticketParams{
-		OrderID:  order.ID,
-		UserID:   order.UserID,
-		TicketID: order.TicketID,
-		QrCode:   qrValue,
-	}); err != nil {
-		log.Printf("[ERROR]   Step 4c FAILED: Could not create eticket record: %v", err)
-		return fmt.Errorf("failed to create eticket: %w", err)
-	}
-
-	qrPNG, err := qrcode.Encode(qrValue, qrcode.Medium, 256)
+	fullOrder, err := s.q.GetOrderByID(ctx, orderID)
 	if err != nil {
-		log.Printf("[ERROR]   Step 4c FAILED: Could not generate QR code: %v", err)
-		return fmt.Errorf("failed to generate QR code: %w", err)
+		return fmt.Errorf("failed to get order: %w", err)
 	}
-	log.Printf("[INFO]   Step 4d: QR code generated successfully (qr_value: %s)", qrValue)
 
-	log.Printf("[INFO]   Step 4e: Sending email to %s", order.UserEmail)
-	if err := sendEticketEmail(order.UserEmail, order.UserName, order.TicketName, qrPNG); err != nil {
-		log.Printf("[ERROR]   Step 4e FAILED: Could not send eticket email: %v", err)
+	quantity := int(fullOrder.Quantity)
+	if quantity < 1 {
+		quantity = 1
+	}
+	orderIDShort := strings.ToUpper(orderID[:8])
+
+	var tickets []ticketGenData
+
+	for i := 1; i <= quantity; i++ {
+		qrValue := uuid.New().String()
+
+		if _, err := s.q.CreateEticket(ctx, db.CreateEticketParams{
+			OrderID:  order.ID,
+			UserID:   order.UserID,
+			TicketID: order.TicketID,
+			QrCode:   qrValue,
+		}); err != nil {
+			return fmt.Errorf("failed to create eticket %d: %w", i, err)
+		}
+
+		qrPNG, err := qrcode.Encode(qrValue, qrcode.Medium, 512)
+		if err != nil {
+			return fmt.Errorf("failed to generate QR code %d: %w", i, err)
+		}
+
+		pdfData, err := generateTicketPDF(i, quantity, qrPNG, order.UserName, order.TicketName, orderIDShort)
+		if err != nil {
+			log.Printf("[WARN] Failed to generate PDF for ticket %d: %v", i, err)
+			pdfData = nil
+		}
+
+		tickets = append(tickets, ticketGenData{
+			index:   i,
+			total:   quantity,
+			qrPNG:   qrPNG,
+			pdfData: pdfData,
+		})
+	}
+
+	if err := sendEticketEmail(
+		order.UserEmail, order.UserName, order.TicketName,
+		orderID, fullOrder.CreatedAt, fullOrder.TotalAmount, tickets,
+	); err != nil {
 		return fmt.Errorf("failed to send eticket email: %w", err)
 	}
-	log.Printf("[INFO]   Step 4f: Email sent successfully to %s", order.UserEmail)
-	log.Printf("[DEBUG] ===== E-TICKET GENERATION COMPLETE =====")
 
+	log.Printf("[INFO] E-ticket generation complete for order: %s (%d tickets)", orderID, quantity)
 	return nil
+}
+
+func generateTicketPDF(index, total int, qrPNG []byte, buyerName, ticketType, orderIDShort string) ([]byte, error) {
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+
+	pageW, _ := pdf.GetPageSize()
+
+	// Header bar
+	pdf.SetFillColor(15, 22, 48)
+	pdf.Rect(0, 0, pageW, 38, "F")
+
+	pdf.SetTextColor(212, 175, 55)
+	pdf.SetFont("Helvetica", "B", 24)
+	pdf.SetXY(0, 8)
+	pdf.CellFormat(pageW, 12, "KIRRIBILLY", "", 1, "C", false, 0, "")
+
+	pdf.SetTextColor(255, 255, 255)
+	pdf.SetFont("Helvetica", "", 12)
+	pdf.SetX(0)
+	pdf.CellFormat(pageW, 8, "Road to Liverpool", "", 1, "C", false, 0, "")
+
+	// Ticket index label
+	pdf.SetTextColor(0, 0, 0)
+	pdf.SetFont("Helvetica", "B", 14)
+	pdf.SetXY(20, 50)
+	pdf.CellFormat(pageW-40, 10, fmt.Sprintf("Tiket %d dari %d", index, total), "", 1, "L", false, 0, "")
+	pdf.Ln(4)
+
+	// QR code centered
+	imgReader := bytes.NewReader(qrPNG)
+	pdf.RegisterImageOptionsReader("qr", fpdf.ImageOptions{ImageType: "PNG"}, imgReader)
+	qrSize := 90.0
+	qrX := (pageW - qrSize) / 2
+	curY := pdf.GetY()
+	pdf.ImageOptions("qr", qrX, curY, qrSize, qrSize, false, fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+	pdf.SetY(curY + qrSize + 8)
+
+	// Details table
+	details := [][]string{
+		{"Nama", buyerName},
+		{"Jenis Tiket", strings.ToUpper(ticketType)},
+		{"No. Pesanan", orderIDShort},
+		{"Acara", "Kamis, 30 Juli 2026 | 19:30 WIB"},
+		{"Tempat", "Deheng House, Jakarta Selatan"},
+		{"Validitas", "Valid untuk 1 orang"},
+	}
+	for _, row := range details {
+		pdf.SetX(20)
+		pdf.SetFont("Helvetica", "B", 11)
+		pdf.CellFormat(45, 8, row[0]+":", "", 0, "L", false, 0, "")
+		pdf.SetFont("Helvetica", "", 11)
+		pdf.CellFormat(pageW-65, 8, row[1], "", 1, "L", false, 0, "")
+	}
+
+	// Footer
+	pdf.SetY(-18)
+	pdf.SetFont("Helvetica", "I", 9)
+	pdf.SetTextColor(120, 120, 120)
+	pdf.CellFormat(pageW, 8, "Tunjukkan QR code ini di pintu masuk venue.", "", 0, "C", false, 0, "")
+
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func sendEticketEmail(toEmail, buyerName, ticketType, orderID string, createdAt time.Time, totalAmount int64, tickets []ticketGenData) error {
+	apiKey := os.Getenv("RESEND_API_KEY")
+	if apiKey == "" {
+		return errors.New("RESEND_API_KEY not set")
+	}
+
+	fromEmail := os.Getenv("FROM_EMAIL")
+	if fromEmail == "" {
+		fromEmail = "ikasman37@gmail.com"
+	}
+
+	orderIDShort := strings.ToUpper(orderID[:8])
+
+	// Build ticket cards HTML
+	var ticketCards strings.Builder
+	for _, t := range tickets {
+		qrBase64 := base64.StdEncoding.EncodeToString(t.qrPNG)
+		ticketCards.WriteString(fmt.Sprintf(`
+<div style="background:#fff;border:2px solid #e8e8e8;border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,0.07);">
+  <div style="text-align:center;margin-bottom:14px;">
+    <span style="background:#0f1630;color:#d4af37;font-weight:bold;font-size:13px;padding:5px 18px;border-radius:20px;letter-spacing:1px;">
+      Tiket %d dari %d
+    </span>
+  </div>
+  <table style="width:100%%;font-size:14px;margin-bottom:16px;">
+    <tr><td style="color:#777;padding:4px 0;width:130px;">Jenis Tiket</td><td style="font-weight:bold;color:#0f1630;">%s</td></tr>
+    <tr><td style="color:#777;padding:4px 0;">Nama</td><td style="font-weight:bold;">%s</td></tr>
+  </table>
+  <div style="text-align:center;padding:16px 0;">
+    <img src="data:image/png;base64,%s" width="230" height="230" alt="QR Code"
+      style="border:4px solid #0f1630;border-radius:8px;display:block;margin:0 auto;" />
+    <p style="font-size:12px;color:#999;margin:10px 0 0;">Scan QR code ini di pintu masuk</p>
+  </div>
+</div>`,
+			t.index, t.total,
+			strings.ToUpper(ticketType),
+			buyerName,
+			qrBase64,
+		))
+	}
+
+	htmlBody := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f0f0f0;font-family:Arial,sans-serif;">
+<table width="100%%" cellpadding="0" cellspacing="0" style="background:#f0f0f0;padding:30px 0;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.12);">
+
+<!-- HEADER -->
+<tr><td style="background:#0f1630;padding:40px;text-align:center;">
+  <div style="color:#d4af37;font-size:40px;font-weight:900;letter-spacing:8px;line-height:1;">KIRRIBILLY</div>
+  <div style="color:#ffffff;font-size:15px;margin-top:8px;letter-spacing:3px;opacity:0.9;">Road to Liverpool</div>
+</td></tr>
+
+<!-- GREETING -->
+<tr><td style="padding:32px 40px 0;">
+  <p style="font-size:18px;color:#222;margin:0 0 8px;">Hi <strong>%s</strong>,</p>
+  <p style="font-size:15px;color:#666;margin:0;line-height:1.6;">Terima kasih telah membeli tiket! Berikut adalah e-ticket Anda.</p>
+</td></tr>
+
+<!-- ORDER DETAILS -->
+<tr><td style="padding:24px 40px 0;">
+  <div style="background:#f8f9fa;border-radius:10px;padding:20px 24px;">
+    <h3 style="margin:0 0 14px;font-size:12px;text-transform:uppercase;letter-spacing:2px;color:#0f1630;border-bottom:1px solid #e0e0e0;padding-bottom:10px;">Order Details</h3>
+    <table style="width:100%%;font-size:14px;border-collapse:collapse;">
+      <tr><td style="color:#888;padding:5px 0;width:175px;">No. Pesanan</td><td style="font-weight:bold;font-family:monospace;">%s</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Waktu Pemesanan</td><td>%s</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Total</td><td style="font-weight:bold;color:#0f1630;font-size:15px;">Rp %s</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Metode Pembayaran</td><td>Midtrans</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Pembeli</td><td>%s &mdash; %s</td></tr>
+    </table>
+  </div>
+</td></tr>
+
+<!-- EVENT DETAILS -->
+<tr><td style="padding:16px 40px 0;">
+  <div style="background:#f8f9fa;border-radius:10px;padding:20px 24px;">
+    <h3 style="margin:0 0 14px;font-size:12px;text-transform:uppercase;letter-spacing:2px;color:#0f1630;border-bottom:1px solid #e0e0e0;padding-bottom:10px;">Event Details</h3>
+    <table style="width:100%%;font-size:14px;border-collapse:collapse;">
+      <tr><td style="color:#888;padding:5px 0;width:175px;">Acara</td><td style="font-weight:bold;">Kirribilly &mdash; Road to Liverpool</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Featuring</td><td>Cakra Khan &amp; Astrid</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Tanggal</td><td style="font-weight:bold;">Kamis, 30 Juli 2026</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Waktu</td><td>19:30 &ndash; 22:00 WIB</td></tr>
+      <tr><td style="color:#888;padding:5px 0;">Tempat</td><td>Deheng House, Jl. Taman Kemang No.32, Jakarta Selatan</td></tr>
+    </table>
+  </div>
+</td></tr>
+
+<!-- TICKETS -->
+<tr><td style="padding:24px 40px 0;">
+  <h3 style="margin:0 0 16px;font-size:12px;text-transform:uppercase;letter-spacing:2px;color:#0f1630;">Tiket Anda</h3>
+  %s
+</td></tr>
+
+<!-- FOOTER -->
+<tr><td style="padding:24px 40px 36px;">
+  <div style="background:#0f1630;border-radius:10px;padding:18px 24px;text-align:center;">
+    <p style="color:#d4af37;font-size:14px;margin:0 0 6px;font-weight:bold;">Tunjukkan QR code ini di pintu masuk venue.</p>
+    <p style="color:#aaaaaa;font-size:12px;margin:0;">Tiket tidak perlu dicetak.</p>
+  </div>
+</td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>`,
+		buyerName,
+		orderIDShort,
+		formatIndonesianDate(createdAt),
+		formatRupiah(totalAmount),
+		buyerName, toEmail,
+		ticketCards.String(),
+	)
+
+	var attachments []*resend.Attachment
+	for _, t := range tickets {
+		if t.pdfData != nil {
+			attachments = append(attachments, &resend.Attachment{
+				Filename: fmt.Sprintf("tiket-%d-%s.pdf", t.index, strings.ToLower(orderID[:8])),
+				Content:  t.pdfData,
+			})
+		}
+	}
+
+	client := resend.NewClient(apiKey)
+	params := &resend.SendEmailRequest{
+		From:        fromEmail,
+		To:          []string{toEmail},
+		Subject:     fmt.Sprintf("🎸 E-Ticket Kirribilly Road to Liverpool - %s", buyerName),
+		Html:        htmlBody,
+		Attachments: attachments,
+	}
+
+	_, err := client.Emails.Send(params)
+	return err
+}
+
+func formatRupiah(amount int64) string {
+	s := strconv.FormatInt(amount, 10)
+	var result strings.Builder
+	n := len(s)
+	for i, c := range s {
+		if i > 0 && (n-i)%3 == 0 {
+			result.WriteByte('.')
+		}
+		result.WriteRune(c)
+	}
+	return result.String()
+}
+
+func formatIndonesianDate(t time.Time) string {
+	days := []string{"Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"}
+	months := []string{"", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+		"Juli", "Agustus", "September", "Oktober", "November", "Desember"}
+	return fmt.Sprintf("%s, %d %s %d %02d:%02d WIB",
+		days[t.Weekday()], t.Day(), months[t.Month()], t.Year(), t.Hour(), t.Minute())
 }
 
 func isValidUUID(u string) bool {
@@ -121,41 +363,4 @@ func (s *EticketService) Checkin(ctx context.Context, qrCode string) (*CheckinRe
 		TicketHolder: details.UserName,
 		TicketType:   details.TicketName,
 	}, nil
-}
-
-func sendEticketEmail(toEmail, name, ticketType string, qrPNG []byte) error {
-	apiKey := os.Getenv("RESEND_API_KEY")
-	if apiKey == "" {
-		return errors.New("RESEND_API_KEY not set")
-	}
-
-	fromEmail := os.Getenv("FROM_EMAIL")
-	if fromEmail == "" {
-		fromEmail = "ikasman37@gmail.com"
-	}
-
-	client := resend.NewClient(apiKey)
-
-	htmlBody := fmt.Sprintf(`
-		<h2>Your E-Ticket</h2>
-		<p>Hi %s,</p>
-		<p>Thank you for your purchase! Your ticket type: <strong>%s</strong></p>
-		<p>Please present the attached QR code at the entrance.</p>
-	`, name, ticketType)
-
-	params := &resend.SendEmailRequest{
-		From:    fromEmail,
-		To:      []string{toEmail},
-		Subject: "Your Concert E-Ticket",
-		Html:    htmlBody,
-		Attachments: []*resend.Attachment{
-			{
-				Filename: "eticket-qr.png",
-				Content:  qrPNG,
-			},
-		},
-	}
-
-	_, err := client.Emails.Send(params)
-	return err
 }
