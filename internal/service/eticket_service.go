@@ -3,7 +3,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -36,10 +35,11 @@ type CheckinResult struct {
 }
 
 type ticketGenData struct {
-	index   int
-	total   int
-	qrPNG   []byte
-	pdfData []byte
+	index      int
+	total      int
+	ticketName string
+	qrPNG      []byte
+	pdfData    []byte
 }
 
 func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) error {
@@ -55,53 +55,91 @@ func (s *EticketService) GenerateAndSend(ctx context.Context, orderID string) er
 		return fmt.Errorf("failed to get order: %w", err)
 	}
 
-	quantity := int(fullOrder.Quantity)
-	if quantity < 1 {
-		quantity = 1
+	// Fetch all item types with their ticket names for this order.
+	// When a user buys multiple ticket types (e.g. Gold + Silver), each type
+	// is stored as a separate order_item row. We generate one QR per unit.
+	orderItems, err := s.q.GetOrderItemsWithTicketNames(ctx, order.ID)
+	if err != nil {
+		log.Printf("[WARN] Could not fetch order items, falling back to single-ticket mode: %v", err)
 	}
-	orderIDShort := strings.ToUpper(orderID[:8])
 
+	// Build a flat list of (ticketID, ticketName) – one entry per unit to scan.
+	type ticketUnit struct {
+		ticketID   uuid.UUID
+		ticketName string
+	}
+	var units []ticketUnit
+
+	if len(orderItems) > 0 {
+		for _, item := range orderItems {
+			for j := int32(0); j < item.Quantity; j++ {
+				units = append(units, ticketUnit{
+					ticketID:   item.TicketID,
+					ticketName: item.TicketName,
+				})
+			}
+		}
+		log.Printf("[INFO] Order %s: %d item type(s), %d total units", orderID, len(orderItems), len(units))
+	} else {
+		// Fallback: use the denormalized quantity on the order row.
+		qty := int(fullOrder.Quantity)
+		if qty < 1 {
+			qty = 1
+		}
+		for j := 0; j < qty; j++ {
+			units = append(units, ticketUnit{
+				ticketID:   order.TicketID,
+				ticketName: order.TicketName,
+			})
+		}
+		log.Printf("[INFO] Order %s: fallback mode, %d unit(s) from order.quantity", orderID, len(units))
+	}
+
+	orderIDShort := strings.ToUpper(orderID[:8])
+	totalTickets := len(units)
 	var tickets []ticketGenData
 
-	for i := 1; i <= quantity; i++ {
+	for i, unit := range units {
+		ticketNumber := i + 1
 		qrValue := uuid.New().String()
 
 		if _, err := s.q.CreateEticket(ctx, db.CreateEticketParams{
 			OrderID:  order.ID,
 			UserID:   order.UserID,
-			TicketID: order.TicketID,
+			TicketID: unit.ticketID,
 			QrCode:   qrValue,
 		}); err != nil {
-			return fmt.Errorf("failed to create eticket %d: %w", i, err)
+			return fmt.Errorf("failed to create eticket %d: %w", ticketNumber, err)
 		}
 
-		qrPNG, err := qrcode.Encode(qrValue, qrcode.Medium, 512)
+		qrPNG, err := qrcode.Encode(qrValue, qrcode.Medium, 256)
 		if err != nil {
-			return fmt.Errorf("failed to generate QR code %d: %w", i, err)
+			return fmt.Errorf("failed to generate QR code %d: %w", ticketNumber, err)
 		}
 
-		pdfData, err := generateTicketPDF(i, quantity, qrPNG, order.UserName, order.TicketName, orderIDShort)
+		pdfData, err := generateTicketPDF(ticketNumber, totalTickets, qrPNG, order.UserName, unit.ticketName, orderIDShort)
 		if err != nil {
-			log.Printf("[WARN] Failed to generate PDF for ticket %d: %v", i, err)
+			log.Printf("[WARN] Failed to generate PDF for ticket %d: %v", ticketNumber, err)
 			pdfData = nil
 		}
 
 		tickets = append(tickets, ticketGenData{
-			index:   i,
-			total:   quantity,
-			qrPNG:   qrPNG,
-			pdfData: pdfData,
+			index:      ticketNumber,
+			total:      totalTickets,
+			ticketName: unit.ticketName,
+			qrPNG:      qrPNG,
+			pdfData:    pdfData,
 		})
 	}
 
 	if err := sendEticketEmail(
-		order.UserEmail, order.UserName, order.TicketName,
+		order.UserEmail, order.UserName,
 		orderID, fullOrder.CreatedAt, fullOrder.TotalAmount, tickets,
 	); err != nil {
 		return fmt.Errorf("failed to send eticket email: %w", err)
 	}
 
-	log.Printf("[INFO] E-ticket generation complete for order: %s (%d tickets)", orderID, quantity)
+	log.Printf("[INFO] E-ticket generation complete for order: %s (%d tickets)", orderID, totalTickets)
 	return nil
 }
 
@@ -171,7 +209,7 @@ func generateTicketPDF(index, total int, qrPNG []byte, buyerName, ticketType, or
 	return buf.Bytes(), nil
 }
 
-func sendEticketEmail(toEmail, buyerName, ticketType, orderID string, createdAt time.Time, totalAmount int64, tickets []ticketGenData) error {
+func sendEticketEmail(toEmail, buyerName, orderID string, createdAt time.Time, totalAmount int64, tickets []ticketGenData) error {
 	apiKey := os.Getenv("RESEND_API_KEY")
 	if apiKey == "" {
 		return errors.New("RESEND_API_KEY not set")
@@ -184,10 +222,10 @@ func sendEticketEmail(toEmail, buyerName, ticketType, orderID string, createdAt 
 
 	orderIDShort := strings.ToUpper(orderID[:8])
 
-	// Build ticket cards HTML
+	// Build ticket cards HTML using CID inline images (works in Gmail and all clients).
 	var ticketCards strings.Builder
 	for _, t := range tickets {
-		qrBase64 := base64.StdEncoding.EncodeToString(t.qrPNG)
+		cidID := fmt.Sprintf("qr-%d", t.index)
 		ticketCards.WriteString(fmt.Sprintf(`
 <div style="background:#fff;border:2px solid #e8e8e8;border-radius:12px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,0.07);">
   <div style="text-align:center;margin-bottom:14px;">
@@ -200,15 +238,15 @@ func sendEticketEmail(toEmail, buyerName, ticketType, orderID string, createdAt 
     <tr><td style="color:#777;padding:4px 0;">Nama</td><td style="font-weight:bold;">%s</td></tr>
   </table>
   <div style="text-align:center;padding:16px 0;">
-    <img src="data:image/png;base64,%s" width="230" height="230" alt="QR Code"
+		<img src="cid:%s" width="200" height="200" alt="QR Code"
       style="border:4px solid #0f1630;border-radius:8px;display:block;margin:0 auto;" />
     <p style="font-size:12px;color:#999;margin:10px 0 0;">Scan QR code ini di pintu masuk</p>
   </div>
 </div>`,
 			t.index, t.total,
-			strings.ToUpper(ticketType),
+			strings.ToUpper(t.ticketName),
 			buyerName,
-			qrBase64,
+			cidID,
 		))
 	}
 
@@ -289,6 +327,15 @@ func sendEticketEmail(toEmail, buyerName, ticketType, orderID string, createdAt 
 
 	var attachments []*resend.Attachment
 	for _, t := range tickets {
+		// Attach QR PNG as inline CID image — works in Gmail and all major email clients.
+		cidID := fmt.Sprintf("qr-%d", t.index)
+		attachments = append(attachments, &resend.Attachment{
+			Filename:        fmt.Sprintf("qr-%d.png", t.index),
+			Content:         t.qrPNG,
+			ContentType:     "image/png",
+			ContentId:       cidID,
+			InlineContentId: cidID,
+		})
 		if t.pdfData != nil {
 			attachments = append(attachments, &resend.Attachment{
 				Filename: fmt.Sprintf("tiket-%d-%s.pdf", t.index, strings.ToLower(orderID[:8])),
@@ -301,7 +348,7 @@ func sendEticketEmail(toEmail, buyerName, ticketType, orderID string, createdAt 
 	params := &resend.SendEmailRequest{
 		From:        fromEmail,
 		To:          []string{toEmail},
-		Subject:     fmt.Sprintf("🎸 E-Ticket Kirribilly Road to Liverpool - %s", buyerName),
+		Subject:     fmt.Sprintf("E-Ticket Kirribilly Road to Liverpool - %s", buyerName),
 		Html:        htmlBody,
 		Attachments: attachments,
 	}

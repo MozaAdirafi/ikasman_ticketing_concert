@@ -58,6 +58,14 @@ type CreateOrderResult struct {
 	Items       []OrderItemResult  `json:"items"`
 }
 
+type midtransItemDetail struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Price    int64  `json:"price"`
+	Quantity int    `json:"quantity"`
+	Category string `json:"category,omitempty"`
+}
+
 func (s *OrderService) CreateOrder(ctx context.Context, params CreateOrderParams) (*CreateOrderResult, error) {
 	log.Printf("[DEBUG] ===== ORDER CREATION START =====")
 	log.Printf("[DEBUG] Parsed request params:")
@@ -113,6 +121,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, params CreateOrderParams
 		itemResults[i].Ticket.Name = ticket.Name
 		itemResults[i].Ticket.Price = ticket.Price
 	}
+
+	const serviceFee int64 = 5000
+	totalAmount += serviceFee
 
 	user, err := qtx.UpsertUser(ctx, db.UpsertUserParams{
 		Name:     params.Name,
@@ -208,15 +219,40 @@ func createMidtransTransaction(orderID string, grossAmount int64, customerName, 
 		return "", errors.New("MIDTRANS_SERVER_KEY not set")
 	}
 
-	itemList := make([]map[string]interface{}, len(items))
+	const serviceFee int64 = 5000
+	itemList := make([]midtransItemDetail, 0, len(items)+1)
 	for i, item := range items {
-		itemList[i] = map[string]interface{}{
-			"id":       item.Ticket.ID,
-			"name":     item.Ticket.Name,
-			"price":    item.Ticket.Price,
-			"quantity": item.Quantity,
-			"category": "ticket",
-		}
+		itemList = append(itemList, midtransItemDetail{
+			ID:       item.Ticket.ID,
+			Name:     item.Ticket.Name,
+			Price:    item.Ticket.Price,
+			Quantity: item.Quantity,
+			Category: "ticket",
+		})
+		log.Printf("[DEBUG] Midtrans ticket item[%d]: id=%s, name=%s, price=%d, quantity=%d", i, item.Ticket.ID, item.Ticket.Name, item.Ticket.Price, item.Quantity)
+	}
+	itemList = append(itemList, midtransItemDetail{
+		ID:       "service-fee",
+		Name:     "Service Fee",
+		Price:    serviceFee,
+		Quantity: 1,
+		Category: "fee",
+	})
+
+	itemDetailsJSON, err := json.Marshal(itemList)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal item details for logging: %w", err)
+	}
+	log.Printf("[DEBUG] Midtrans item_details: %s", string(itemDetailsJSON))
+
+	var calculatedAmount int64
+	for _, item := range items {
+		calculatedAmount += item.Ticket.Price * int64(item.Quantity)
+	}
+	calculatedAmount += serviceFee
+	log.Printf("[DEBUG] Midtrans gross_amount calculation: items=%d + service_fee=%d => %d", calculatedAmount-serviceFee, serviceFee, calculatedAmount)
+	if calculatedAmount != grossAmount {
+		log.Printf("[WARN] gross_amount mismatch: calculated=%d, expected=%d", calculatedAmount, grossAmount)
 	}
 
 	frontendURL := os.Getenv("FRONTEND_URL")
@@ -278,6 +314,7 @@ func createMidtransTransaction(orderID string, grossAmount int64, customerName, 
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		log.Printf("[ERROR] Midtrans response: %s", string(body))
 		return "", fmt.Errorf("Midtrans API error: status %d, body: %s", resp.StatusCode, string(body))
 	}
 

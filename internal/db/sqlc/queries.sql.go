@@ -284,3 +284,27 @@ func (q *Queries) ListOrderItems(ctx context.Context, orderID uuid.UUID) ([]Orde
 	}
 	return items, rows.Err()
 }
+
+const getOrderItemsWithTicketNames = `
+SELECT oi.ticket_id, t.name, oi.quantity
+FROM order_items oi
+JOIN tickets t ON t.id = oi.ticket_id
+WHERE oi.order_id = $1
+ORDER BY oi.created_at ASC`
+
+func (q *Queries) GetOrderItemsWithTicketNames(ctx context.Context, orderID uuid.UUID) ([]OrderItemWithTicketName, error) {
+	rows, err := q.db.Query(ctx, getOrderItemsWithTicketNames, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OrderItemWithTicketName
+	for rows.Next() {
+		var oi OrderItemWithTicketName
+		if err := rows.Scan(&oi.TicketID, &oi.TicketName, &oi.Quantity); err != nil {
+			return nil, err
+		}
+		items = append(items, oi)
+	}
+	return items, rows.Err()
+}

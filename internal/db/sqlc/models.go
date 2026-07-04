@@ -81,3 +81,9 @@ type EticketDetails struct {
 	UserName   string `json:"user_name"`
 	TicketName string `json:"ticket_name"`
 }
+
+type OrderItemWithTicketName struct {
+	TicketID   uuid.UUID `json:"ticket_id"`
+	TicketName string    `json:"ticket_name"`
+	Quantity   int32     `json:"quantity"`
+}
