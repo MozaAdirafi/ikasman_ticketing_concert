@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -13,11 +15,19 @@ func CORS() gin.HandlerFunc {
 		frontendURL = "http://localhost:3000"
 	}
 
-	wwwOrigin := "https://www." + strings.TrimPrefix(frontendURL, "https://")
+	wwwOrigin := ""
+	if parsed, err := url.Parse(frontendURL); err == nil && parsed.Host != "" {
+		wwwOrigin = fmt.Sprintf("%s://www.%s", parsed.Scheme, strings.TrimPrefix(parsed.Host, "www."))
+	}
+
 	allowedOrigins := []string{
 		frontendURL,
-		wwwOrigin,
 		"https://ikasman-ticketing-concert-fe.vercel.app",
+		"http://localhost:3000",
+		"http://localhost:3001",
+	}
+	if wwwOrigin != "" {
+		allowedOrigins = append(allowedOrigins, wwwOrigin)
 	}
 
 	return func(c *gin.Context) {
@@ -31,7 +41,13 @@ func CORS() gin.HandlerFunc {
 
 		c.Header("Vary", "Origin")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
+
+		requestHeaders := c.GetHeader("Access-Control-Request-Headers")
+		if requestHeaders != "" {
+			c.Header("Access-Control-Allow-Headers", requestHeaders)
+		} else {
+			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-Admin-PIN")
+		}
 		c.Header("Access-Control-Allow-Credentials", "true")
 
 		if c.Request.Method == "OPTIONS" {

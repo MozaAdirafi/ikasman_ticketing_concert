@@ -38,6 +38,9 @@ func main() {
 	}
 
 	r := router.SetupRouter(pool)
+	for _, route := range r.Routes() {
+		log.Printf("[ROUTE] %s %s", route.Method, route.Path)
+	}
 
 	log.Printf("[INFO] Server starting on :%s", port)
 	if err := r.Run(":" + port); err != nil {

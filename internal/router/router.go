@@ -30,6 +30,7 @@ func SetupRouter(pool *pgxpool.Pool) *gin.Engine {
 	orderHandler := handler.NewOrderHandler(orderSvc)
 	paymentHandler := handler.NewPaymentHandler(paymentSvc, eticketSvc)
 	checkinHandler := handler.NewCheckinHandler(eticketSvc)
+	adminHandler := handler.NewAdminHandler(queries, pool, eticketSvc)
 
 	api := r.Group("/api/v1")
 	{
@@ -40,7 +41,24 @@ func SetupRouter(pool *pgxpool.Pool) *gin.Engine {
 		api.GET("/payments/status/:order_id", paymentHandler.GetPaymentStatus)
 		api.POST("/payments/webhook", paymentHandler.HandleWebhook)
 
+		api.OPTIONS("/checkin", func(c *gin.Context) {
+			c.Status(204)
+		})
+
+		adminPreflight := api.Group("/admin")
+		adminPreflight.OPTIONS("/*path", func(c *gin.Context) {
+			c.Status(204)
+		})
+
 		api.POST("/checkin", middleware.AdminAuth(), checkinHandler.Checkin)
+
+		admin := api.Group("/admin", middleware.AdminAuth())
+		{
+			admin.GET("/dashboard", adminHandler.GetDashboard)
+			admin.GET("/attendees", adminHandler.GetAttendees)
+			admin.GET("/attendees/export", adminHandler.ExportAttendees)
+			admin.POST("/payment/confirm/:order_id", adminHandler.ConfirmPayment)
+		}
 	}
 
 	return r

@@ -125,13 +125,22 @@ func (s *OrderService) CreateOrder(ctx context.Context, params CreateOrderParams
 	const serviceFee int64 = 5000
 	totalAmount += serviceFee
 
-	user, err := qtx.UpsertUser(ctx, db.UpsertUserParams{
-		Name:     params.Name,
-		Email:    params.Email,
-		Whatsapp: params.Whatsapp,
-	})
+	// Insert new user (with ON CONFLICT DO NOTHING to preserve existing user data).
+	// Then always SELECT by email to get the user_id (whether newly created or existing).
+	_, err = tx.Exec(ctx, `
+INSERT INTO users (name, email, whatsapp)
+VALUES ($1, $2, $3)
+ON CONFLICT (email) DO NOTHING`, params.Name, params.Email, params.Whatsapp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to upsert user: %w", err)
+		return nil, fmt.Errorf("failed to insert user: %w", err)
+	}
+
+	// Select user by email to get id (new or existing).
+	var user db.User
+	err = tx.QueryRow(ctx, `SELECT id, name, email, whatsapp, created_at FROM users WHERE email = $1`, params.Email).Scan(
+		&user.ID, &user.Name, &user.Email, &user.Whatsapp, &user.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch user by email: %w", err)
 	}
 	log.Printf("[DEBUG] User upserted: user_id=%s", user.ID)
 

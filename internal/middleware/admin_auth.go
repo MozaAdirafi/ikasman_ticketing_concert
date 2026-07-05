@@ -9,6 +9,11 @@ import (
 
 func AdminAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.Request.Method == http.MethodOptions {
+			c.Next()
+			return
+		}
+
 		pin := c.GetHeader("X-Admin-PIN")
 		if pin == "" {
 			pin = c.Query("pin")
