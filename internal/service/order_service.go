@@ -300,7 +300,7 @@ func createMidtransTransaction(orderID string, grossAmount int64, customerName, 
 		return "", fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://app.sandbox.midtrans.com/snap/v1/transactions", bytes.NewBuffer(jsonPayload))
+	req, err := http.NewRequest("POST", "https://app.midtrans.com/snap/v1", bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
